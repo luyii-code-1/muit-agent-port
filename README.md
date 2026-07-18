@@ -42,6 +42,8 @@ Codex A -- MCP /mcp --> Relay <-- WSS /bridge -- Bridge B -- stdio --> codex app
 
 ## 1. 安装
 
+需要让 AI 在新电脑上完成安全部署、配对和验证时，使用 [`install.md`](install.md)。
+
 ```bash
 npm install
 npm run build
