@@ -27,6 +27,8 @@ const desktop = new DesktopIpc();
 const ledger = new BridgeLedger(config.ledgerPath);
 const queue: DispatchPayload[] = [];
 const queuedIds = new Set<string>();
+const activeTasks = new Map<string, string>();
+const cancelledIds = new Set<string>();
 let active = 0;
 let socket: WebSocket | undefined;
 let stopping = false;
@@ -95,6 +97,9 @@ async function handleRelayMessage(raw: string): Promise<void> {
     case "dispatch":
       acceptTask(message.task);
       break;
+    case "cancel":
+      await cancelTask(message.taskId, message.threadId);
+      break;
   }
 }
 
@@ -153,6 +158,7 @@ async function runTask(task: DispatchPayload): Promise<void> {
       threadId = await codex.startThread(cwd, config.approvalPolicy, config.sandbox);
     }
     ledger.update(task.taskId, "running", { threadId });
+    activeTasks.set(task.taskId, threadId);
     const prompt = buildCollaborationPrompt(task);
     let result: string;
     if (selected) {
@@ -176,13 +182,34 @@ async function runTask(task: DispatchPayload): Promise<void> {
       result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt });
     }
     ledger.update(task.taskId, "completed", { threadId, result });
-    send({ type: "task_completed", taskId: task.taskId, threadId, result });
+    if (!cancelledIds.has(task.taskId)) send({ type: "task_completed", taskId: task.taskId, threadId, result });
     await sendHeartbeat();
   } catch (error) {
     const message = errorMessage(error);
-    ledger.update(task.taskId, "failed", { threadId, error: message });
-    send({ type: "task_failed", taskId: task.taskId, threadId, error: message });
+    if (cancelledIds.has(task.taskId)) {
+      ledger.update(task.taskId, "failed", { threadId, error: "Cancelled by requester" });
+      send({ type: "task_cancelled", taskId: task.taskId, threadId });
+    } else {
+      ledger.update(task.taskId, "failed", { threadId, error: message });
+      send({ type: "task_failed", taskId: task.taskId, threadId, error: message });
+    }
+  } finally {
+    activeTasks.delete(task.taskId);
+    cancelledIds.delete(task.taskId);
   }
+}
+
+async function cancelTask(taskId: string, requestedThreadId?: string): Promise<void> {
+  const threadId = activeTasks.get(taskId) ?? requestedThreadId;
+  cancelledIds.add(taskId);
+  const queuedIndex = queue.findIndex((task) => task.taskId === taskId);
+  if (queuedIndex >= 0) {
+    queue.splice(queuedIndex, 1);
+    queuedIds.delete(taskId);
+  }
+  if (threadId) await desktop.interruptTurn(threadId);
+  ledger.update(taskId, "failed", { threadId, error: "Cancelled by requester" });
+  send({ type: "task_cancelled", taskId, threadId });
 }
 
 function chooseThread(task: DispatchPayload, threads: ThreadSummary[]): ThreadSummary | undefined {

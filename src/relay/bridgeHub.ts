@@ -58,6 +58,13 @@ export class BridgeHub {
     return true;
   }
 
+  cancel(task: MeshTask): boolean {
+    const socket = this.sockets.get(task.targetNodeId);
+    if (!socket || socket.readyState !== socket.OPEN) return false;
+    this.send(socket, { type: "cancel", taskId: task.taskId, threadId: task.selectedThreadId ?? task.threadId });
+    return true;
+  }
+
   close(): void {
     for (const socket of this.sockets.values()) socket.close(1001, "Relay shutting down");
     this.wss.close();
@@ -135,6 +142,13 @@ export class BridgeHub {
               status: "failed",
               selectedThreadId: message.threadId,
               error: message.error,
+            });
+            break;
+          case "task_cancelled":
+            this.store.updateTask(message.taskId, {
+              status: "cancelled",
+              selectedThreadId: message.threadId,
+              error: undefined,
             });
             break;
         }

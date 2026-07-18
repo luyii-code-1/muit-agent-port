@@ -85,6 +85,11 @@ export class DesktopIpc extends EventEmitter {
     return response.result;
   }
 
+  async interruptTurn(threadId: string): Promise<void> {
+    await this.connect();
+    await this.request("thread-follower-interrupt-turn", { conversationId: threadId }, 2, 30_000);
+  }
+
   async runTurn(
     options: DesktopTurnOptions,
     onProgress: (progress: CodexProgress) => void,

@@ -79,6 +79,11 @@ export const bridgeToRelaySchema = z.discriminatedUnion("type", [
     threadId: z.string().optional(),
     error: z.string().max(20_000),
   }),
+  z.object({
+    type: z.literal("task_cancelled"),
+    taskId: z.string(),
+    threadId: z.string().optional(),
+  }),
 ]);
 
 export type BridgeToRelay = z.infer<typeof bridgeToRelaySchema>;
@@ -86,6 +91,7 @@ export type BridgeToRelay = z.infer<typeof bridgeToRelaySchema>;
 export const relayToBridgeSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("hello_ack"), nodeId: z.string() }),
   z.object({ type: z.literal("dispatch"), task: dispatchPayloadSchema }),
+  z.object({ type: z.literal("cancel"), taskId: z.string(), threadId: z.string().optional() }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 
@@ -96,7 +102,8 @@ export type TaskStatus =
   | "dispatched"
   | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface MeshTask extends DispatchPayload {
   targetNodeId: string;

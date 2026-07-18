@@ -12,7 +12,7 @@ import type { RelayConfig } from "./config.js";
 import type { PairingService } from "./pairing.js";
 import type { MeshStore } from "./store.js";
 
-const TERMINAL_STATUSES = new Set(["completed", "failed"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export class MeshMcpService {
   private readonly transports = new Map<string, StreamableHTTPServerTransport>();
@@ -287,6 +287,26 @@ export class MeshMcpService {
           consultation: redactSecrets(consultation.result),
           task: current ? safeTask(current) : undefined,
         });
+      },
+    );
+
+    server.registerTool(
+      "codex_mesh_cancel",
+      {
+        title: "Cancel a Codex mesh task",
+        description: "Interrupt the Desktop turn associated with a mesh task and mark it cancelled. This also works for a stale task whose Relay status is already failed.",
+        inputSchema: {
+          task_id: z.string().min(1),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      },
+      async ({ task_id }) => {
+        const task = this.store.getTask(task_id);
+        if (!task) return errorResult(`Unknown task: ${task_id}`);
+        const delivered = this.hub.cancel(task);
+        if (!delivered) return errorResult(`Target node is offline; task was not interrupted: ${task.targetNodeId}`);
+        const cancelled = this.store.updateTask(task_id, { status: "cancelled", error: undefined });
+        return result({ delivered, task: cancelled ? safeTask(cancelled) : undefined });
       },
     );
 
