@@ -48,6 +48,12 @@ describe("MeshStore", () => {
       title: "Thinking",
       detail: "Inspecting shared styles",
     });
+    store.appendTaskEvent({
+      taskId: "task-1",
+      kind: "thinking",
+      title: "Thinking",
+      detail: "Inspecting shared styles and controls",
+    });
 
     expect(store.getNode("mac")?.threads[0]?.id).toBe("thread-1");
     expect(store.getTask("task-1")).toMatchObject({
@@ -59,7 +65,7 @@ describe("MeshStore", () => {
     expect(store.getTask("task-1")?.events).toMatchObject([{
       kind: "thinking",
       title: "Thinking",
-      detail: "Inspecting shared styles",
+      detail: "Inspecting shared styles and controls",
     }]);
     store.close();
   });

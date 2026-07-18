@@ -280,15 +280,47 @@ export class MeshStore {
 
   appendTaskEvent(event: Omit<MeshTaskEvent, "id" | "createdAt">): MeshTaskEvent {
     const createdAt = Date.now();
+    const previous = this.db.prepare(`
+      SELECT id, kind, title, detail, payload_json, created_at
+      FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1
+    `).get(event.taskId) as {
+      id: number; kind: MeshTaskEvent["kind"]; title: string; detail: string | null;
+      payload_json: string | null; created_at: number;
+    } | undefined;
+    const safeTitle = redactSecrets(event.title);
+    const safeDetail = event.detail ? redactSecrets(event.detail) : undefined;
+    const safePayload = event.payload ? redactSecrets(JSON.stringify(event.payload)) : undefined;
+    if (
+      previous
+      && previous.kind === event.kind
+      && previous.title === safeTitle
+      && createdAt - previous.created_at < 10_000
+      && (!previous.detail || safeDetail?.startsWith(previous.detail))
+    ) {
+      this.db.prepare(`
+        UPDATE task_events SET detail = ?, payload_json = ?, created_at = ? WHERE id = ?
+      `).run(safeDetail ?? previous.detail, safePayload ?? previous.payload_json, createdAt, previous.id);
+      this.db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(createdAt, event.taskId);
+      const saved = {
+        ...event,
+        id: previous.id,
+        title: safeTitle,
+        detail: safeDetail ?? previous.detail ?? undefined,
+        payload: safePayload ? JSON.parse(safePayload) as Record<string, unknown> : event.payload,
+        createdAt,
+      };
+      this.emitChange(event.taskId);
+      return saved;
+    }
     const result = this.db.prepare(`
       INSERT INTO task_events (task_id, kind, title, detail, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       event.taskId,
       event.kind,
-      redactSecrets(event.title),
-      event.detail ? redactSecrets(event.detail) : null,
-      event.payload ? redactSecrets(JSON.stringify(event.payload)) : null,
+      safeTitle,
+      safeDetail ?? null,
+      safePayload ?? null,
       createdAt,
     );
     // Bound retained progress per task so long-running command output cannot grow forever.
