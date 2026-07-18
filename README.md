@@ -27,6 +27,8 @@ Codex A -- MCP /mcp --> Relay <-- WSS /bridge -- Bridge B -- stdio --> codex app
   - `best`：按 `cwd`、`thread_query`、空闲状态和活跃时间选择；无合适对话时新建；
   - `new`：始终创建新对话。
 - `codex_mesh_task`：查询或短暂等待远程结果。
+- 对已有任务的委派优先通过 Codex Desktop 本机 IPC 附着到原任务，由 Desktop 自身启动 turn。
+- Relay 网页通过 SSE 显示实时状态、可公开的 Thinking 摘要、工具调用、命令和文件修改过程。
 - `codex_mesh_activity`：通过 Tool Call 查看最近的 Codex 间协作提示和结果。
 - `codex_mesh_pairing_code`：通过 Tool Call 生成 6 位一次性节点配对码。
 - Relay 首页提供轻量控制台，显示电脑、Codex 对话标题、任务提示、状态和返回结果。
@@ -169,6 +171,12 @@ Codex 会组合调用：
 ```
 
 ## 路由规则
+
+### Desktop 附着模式
+
+当路由选中了已有任务（`exact` 或成功匹配的 `best`）时，Bridge 会连接本机 Codex Desktop IPC：macOS 为 `~/.codex/ipc/ipc.sock`，Windows 为 `\\.\pipe\codex-ipc`。Desktop 必须正在运行并能持有目标任务；否则任务会明确失败，不再静默切换到不可见的后台 turn。
+
+`routing=new` 仍会在空白收件箱项目中创建后台 app-server 任务，因为它没有可附着的 Desktop 任务。网页会明确标记“后台”。Thinking 只显示 Codex 提供的推理摘要，不显示隐藏的内部推理原文。
 
 - `exact` 只接受目标电脑真实存在的 `thread_id`，不存在就失败，不会静默投到其他对话。
 - `best` 先严格匹配 `cwd`，再匹配 `thread_query` 的标题/首条消息关键词，然后参考空闲状态和最近更新时间。

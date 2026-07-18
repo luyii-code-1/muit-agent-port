@@ -44,6 +44,22 @@ app.get("/api/snapshot", (_request, response) => {
     memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
 });
+app.get("/api/events", (request, response) => {
+  response.status(200);
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.write(`event: ready\ndata: {}\n\n`);
+  const unsubscribe = store.subscribe((taskId) => {
+    response.write(`event: task\ndata: ${JSON.stringify({ taskId })}\n\n`);
+  });
+  const ping = setInterval(() => response.write(`: ping\n\n`), 20_000);
+  request.on("close", () => {
+    clearInterval(ping);
+    unsubscribe();
+  });
+});
 app.post("/api/pairing-code", (_request, response) => response.json(pairing.createCode(10)));
 app.post("/pair", (request, response) => {
   const address = request.ip || request.socket.remoteAddress || "unknown";

@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import Database from "better-sqlite3";
 
-import type { DispatchPayload, MeshNode, MeshTask, ProjectSummary, TaskStatus, ThreadSummary } from "../shared/types.js";
+import type { DispatchPayload, MeshNode, MeshTask, MeshTaskEvent, ProjectSummary, TaskStatus, ThreadSummary } from "../shared/types.js";
 import { redactSecrets } from "../shared/util.js";
 
 interface TaskRow {
@@ -18,6 +18,7 @@ interface TaskRow {
   metadata_json: string | null;
   status: TaskStatus;
   selected_thread_id: string | null;
+  execution_mode: "desktop" | "background" | null;
   result: string | null;
   error: string | null;
   created_at: number;
@@ -84,6 +85,19 @@ export class MeshStore {
         expires_at INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT,
+        payload_json TEXT,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS task_events_task_id_idx
+      ON task_events(task_id, id);
     `);
     const nodeColumns = this.db.pragma("table_info(nodes)") as Array<{ name: string }>;
     if (!nodeColumns.some((column) => column.name === "token_hash")) {
@@ -91,6 +105,10 @@ export class MeshStore {
     }
     if (!nodeColumns.some((column) => column.name === "projects_json")) {
       this.db.exec("ALTER TABLE nodes ADD COLUMN projects_json TEXT NOT NULL DEFAULT '[]'");
+    }
+    const taskColumns = this.db.pragma("table_info(tasks)") as Array<{ name: string }>;
+    if (!taskColumns.some((column) => column.name === "execution_mode")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN execution_mode TEXT");
     }
   }
 
@@ -190,11 +208,11 @@ export class MeshStore {
       INSERT INTO tasks (
         id, source_node_id, target_node_id, prompt, routing, thread_id,
         thread_query, cwd, metadata_json, status, selected_thread_id,
-        result, error, created_at, updated_at
+        result, error, execution_mode, created_at, updated_at
       ) VALUES (
         @id, @sourceNodeId, @targetNodeId, @prompt, @routing, @threadId,
         @threadQuery, @cwd, @metadata, @status, @selectedThreadId,
-        @result, @error, @createdAt, @updatedAt
+        @result, @error, @executionMode, @createdAt, @updatedAt
       )
     `).run({
       id: task.taskId,
@@ -210,10 +228,11 @@ export class MeshStore {
       selectedThreadId: task.selectedThreadId ?? null,
       result: task.result ?? null,
       error: task.error ?? null,
+      executionMode: task.executionMode ?? null,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
     });
-    this.events.emit(task.taskId);
+    this.emitChange(task.taskId);
   }
 
   getTask(taskId: string): MeshTask | undefined {
@@ -232,7 +251,7 @@ export class MeshStore {
 
   updateTask(
     taskId: string,
-    patch: Partial<Pick<MeshTask, "status" | "selectedThreadId" | "result" | "error">>,
+    patch: Partial<Pick<MeshTask, "status" | "selectedThreadId" | "executionMode" | "result" | "error">>,
   ): MeshTask | undefined {
     const current = this.getTask(taskId);
     if (!current) return undefined;
@@ -241,6 +260,7 @@ export class MeshStore {
       UPDATE tasks SET
         status = @status,
         selected_thread_id = @selectedThreadId,
+        execution_mode = @executionMode,
         result = @result,
         error = @error,
         updated_at = @updatedAt
@@ -249,12 +269,43 @@ export class MeshStore {
       id: taskId,
       status: next.status,
       selectedThreadId: next.selectedThreadId ?? null,
+      executionMode: next.executionMode ?? null,
       result: next.result ?? null,
       error: next.error ?? null,
       updatedAt: next.updatedAt,
     });
-    this.events.emit(taskId);
+    this.emitChange(taskId);
     return next;
+  }
+
+  appendTaskEvent(event: Omit<MeshTaskEvent, "id" | "createdAt">): MeshTaskEvent {
+    const createdAt = Date.now();
+    const result = this.db.prepare(`
+      INSERT INTO task_events (task_id, kind, title, detail, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      event.taskId,
+      event.kind,
+      redactSecrets(event.title),
+      event.detail ? redactSecrets(event.detail) : null,
+      event.payload ? redactSecrets(JSON.stringify(event.payload)) : null,
+      createdAt,
+    );
+    // Bound retained progress per task so long-running command output cannot grow forever.
+    this.db.prepare(`
+      DELETE FROM task_events WHERE task_id = ? AND id NOT IN (
+        SELECT id FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 250
+      )
+    `).run(event.taskId, event.taskId);
+    const saved = { ...event, id: Number(result.lastInsertRowid), createdAt };
+    this.db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(createdAt, event.taskId);
+    this.emitChange(event.taskId);
+    return saved;
+  }
+
+  subscribe(listener: (taskId: string) => void): () => void {
+    this.events.on("change", listener);
+    return () => this.events.off("change", listener);
   }
 
   async waitForTask(taskId: string, timeoutMs: number): Promise<MeshTask | undefined> {
@@ -306,11 +357,37 @@ export class MeshStore {
       metadata: row.metadata_json ? JSON.parse(row.metadata_json) as Record<string, unknown> : undefined,
       status: row.status,
       selectedThreadId: row.selected_thread_id ?? undefined,
+      executionMode: row.execution_mode ?? undefined,
+      events: this.listTaskEvents(row.id),
       result: row.result ?? undefined,
       error: row.error ?? undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  private listTaskEvents(taskId: string): MeshTaskEvent[] {
+    const rows = this.db.prepare(`
+      SELECT id, task_id, kind, title, detail, payload_json, created_at
+      FROM task_events WHERE task_id = ? ORDER BY id ASC
+    `).all(taskId) as Array<{
+      id: number; task_id: string; kind: MeshTaskEvent["kind"]; title: string;
+      detail: string | null; payload_json: string | null; created_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: row.task_id,
+      kind: row.kind,
+      title: row.title,
+      detail: row.detail ?? undefined,
+      payload: row.payload_json ? JSON.parse(row.payload_json) as Record<string, unknown> : undefined,
+      createdAt: row.created_at,
+    }));
+  }
+
+  private emitChange(taskId: string): void {
+    this.events.emit(taskId);
+    this.events.emit("change", taskId);
   }
 }
 

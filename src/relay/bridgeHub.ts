@@ -109,7 +109,17 @@ export class BridgeHub {
             this.store.updateTask(message.taskId, {
               status: "running",
               selectedThreadId: message.threadId,
+              executionMode: message.executionMode,
               error: undefined,
+            });
+            break;
+          case "task_progress":
+            this.store.appendTaskEvent({
+              taskId: message.taskId,
+              kind: message.kind,
+              title: message.title,
+              detail: message.detail,
+              payload: message.payload,
             });
             break;
           case "task_completed":

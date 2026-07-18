@@ -9,6 +9,7 @@ import {
 } from "../shared/types.js";
 import { errorMessage, sleep } from "../shared/util.js";
 import { CodexAppServer } from "./codexAppServer.js";
+import { DesktopIpc } from "./desktopIpc.js";
 import { applyBridgeArgs } from "./args.js";
 import { assertAllowedCwd, isAllowedCwd, loadBridgeConfig } from "./config.js";
 import { BridgeLedger } from "./ledger.js";
@@ -22,6 +23,7 @@ applyBridgeArgs(process.argv.slice(2));
 const config = loadBridgeConfig();
 await ensurePaired(config);
 const codex = new CodexAppServer(config.codexCommand);
+const desktop = new DesktopIpc();
 const ledger = new BridgeLedger(config.ledgerPath);
 const queue: DispatchPayload[] = [];
 const queuedIds = new Set<string>();
@@ -147,14 +149,35 @@ async function runTask(task: DispatchPayload): Promise<void> {
       : createEmptyInboxProject(config.inboxRoot, task.taskId, config.allowedRoots);
     if (selected) {
       threadId = selected.id;
-      await codex.resumeThread(threadId, cwd, config.approvalPolicy, config.sandbox);
     } else {
       threadId = await codex.startThread(cwd, config.approvalPolicy, config.sandbox);
     }
     ledger.update(task.taskId, "running", { threadId });
-    send({ type: "task_started", taskId: task.taskId, threadId });
     const prompt = buildCollaborationPrompt(task);
-    const result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt });
+    let result: string;
+    if (selected) {
+      const before = await codex.readThreadDetail(threadId);
+      const previousTurnIds = new Set((before.turns ?? []).map((turn) => turn.id));
+      send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "desktop" });
+      sendProgress(task.taskId, threadId, "status", "Attached to Codex Desktop task");
+      await desktop.startTurn({
+        threadId,
+        prompt,
+        cwd,
+        approvalPolicy: config.approvalPolicy,
+      });
+      const seen = new Set<string>();
+      result = await codex.waitForExternalTurn(threadId, previousTurnIds, (progress) => {
+        const signature = JSON.stringify(progress);
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        sendProgress(task.taskId, threadId!, progress.kind, progress.title, progress.detail, progress.payload);
+      });
+    } else {
+      send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "background" });
+      sendProgress(task.taskId, threadId, "warning", "New empty-project task uses background app-server mode");
+      result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt });
+    }
     ledger.update(task.taskId, "completed", { threadId, result });
     send({ type: "task_completed", taskId: task.taskId, threadId, result });
     await sendHeartbeat();
@@ -187,10 +210,22 @@ function send(message: BridgeToRelay): void {
   socket.send(JSON.stringify(message));
 }
 
+function sendProgress(
+  taskId: string,
+  threadId: string,
+  kind: "status" | "thinking" | "message" | "tool" | "command" | "file" | "warning",
+  title: string,
+  detail?: string,
+  payload?: Record<string, unknown>,
+): void {
+  send({ type: "task_progress", taskId, threadId, kind, title, detail, payload });
+}
+
 async function shutdown(): Promise<void> {
   if (stopping) return;
   stopping = true;
   socket?.close(1000, "Bridge shutting down");
+  desktop.close();
   await codex.stop();
   ledger.close();
 }

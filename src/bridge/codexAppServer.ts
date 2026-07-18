@@ -31,6 +31,7 @@ interface CodexThread {
   status: { type?: string } | string;
   createdAt: number;
   updatedAt: number;
+  turns?: Turn[];
 }
 
 interface ThreadListResult {
@@ -43,8 +44,18 @@ interface ThreadResult {
 }
 
 interface TurnItem {
+  id?: string;
   type: string;
   text?: string;
+  status?: string;
+  command?: string | string[];
+  aggregatedOutput?: string;
+  output?: string;
+  summary?: unknown;
+  title?: string;
+  name?: string;
+  path?: string;
+  changes?: unknown;
 }
 
 interface Turn {
@@ -63,6 +74,13 @@ export interface RunOptions {
   prompt: string;
   cwd: string;
   approvalPolicy: ApprovalPolicy;
+}
+
+export interface CodexProgress {
+  kind: "status" | "thinking" | "message" | "tool" | "command" | "file" | "warning";
+  title: string;
+  detail?: string;
+  payload?: Record<string, unknown>;
 }
 
 export class CodexAppServer {
@@ -143,6 +161,45 @@ export class CodexAppServer {
   async readThread(threadId: string): Promise<ThreadSummary> {
     const result = await this.call("thread/read", { threadId, includeTurns: false }) as ThreadResult;
     return this.summarizeThread(result.thread);
+  }
+
+  async readThreadDetail(threadId: string): Promise<CodexThread> {
+    const result = await this.call("thread/read", { threadId, includeTurns: true }) as ThreadResult;
+    return result.thread;
+  }
+
+  async waitForExternalTurn(
+    threadId: string,
+    previousTurnIds: Set<string>,
+    onProgress: (progress: CodexProgress) => void,
+    timeoutMs = 2 * 60 * 60 * 1000,
+  ): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let lastFingerprint = "";
+    let selectedTurnId: string | undefined;
+    while (Date.now() < deadline) {
+      const thread = await this.readThreadDetail(threadId);
+      const turns = thread.turns ?? [];
+      const turn = selectedTurnId
+        ? turns.find((candidate) => candidate.id === selectedTurnId)
+        : [...turns].reverse().find((candidate) => !previousTurnIds.has(candidate.id));
+      if (turn) {
+        selectedTurnId = turn.id;
+        const fingerprint = JSON.stringify({ status: turn.status, items: turn.items });
+        if (fingerprint !== lastFingerprint) {
+          lastFingerprint = fingerprint;
+          for (const progress of summarizeTurnProgress(turn)) onProgress(progress);
+        }
+        if (turn.status !== "inProgress" && turn.status !== "in_progress" && turn.status !== "running") {
+          if (turn.status !== "completed") {
+            throw new Error(turn.error?.message ?? `Desktop Codex turn ended with status ${turn.status}`);
+          }
+          return finalAgentMessage(turn);
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 650));
+    }
+    throw new Error(`Desktop Codex turn timed out in thread ${threadId}`);
   }
 
   async startThread(
@@ -272,4 +329,45 @@ export class CodexAppServer {
       updatedAt: thread.updatedAt,
     };
   }
+}
+
+function finalAgentMessage(turn: Turn): string {
+  const messages = turn.items
+    .filter((item) => item.type === "agentMessage" && item.text)
+    .map((item) => item.text!);
+  return messages.at(-1) ?? "Task completed without a final agent message.";
+}
+
+export function summarizeTurnProgress(turn: Turn): CodexProgress[] {
+  const progress: CodexProgress[] = [{ kind: "status", title: `Turn ${turn.status}` }];
+  for (const item of turn.items) {
+    const detail = item.text ?? item.aggregatedOutput ?? item.output;
+    if (item.type === "reasoning") {
+      const summary = textFromUnknown(item.summary) || detail;
+      if (summary) progress.push({ kind: "thinking", title: "Thinking", detail: summary });
+    } else if (item.type === "agentMessage" && detail) {
+      progress.push({ kind: "message", title: "Codex message", detail });
+    } else if (item.type === "commandExecution") {
+      const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
+      progress.push({ kind: "command", title: command || "Command", detail, payload: item.status ? { status: item.status } : undefined });
+    } else if (item.type === "fileChange") {
+      progress.push({ kind: "file", title: item.path || item.title || "File change", detail: textFromUnknown(item.changes) || detail });
+    } else if (/tool|mcp/i.test(item.type)) {
+      progress.push({ kind: "tool", title: item.title || item.name || item.type, detail });
+    }
+  }
+  return progress;
+}
+
+function textFromUnknown(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const text = value.map(textFromUnknown).filter(Boolean).join("\n");
+    return text || undefined;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return textFromUnknown(record.text ?? record.summary ?? record.content);
+  }
+  return undefined;
 }

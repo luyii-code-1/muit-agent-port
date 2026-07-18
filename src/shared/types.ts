@@ -56,6 +56,16 @@ export const bridgeToRelaySchema = z.discriminatedUnion("type", [
     type: z.literal("task_started"),
     taskId: z.string(),
     threadId: z.string(),
+    executionMode: z.enum(["desktop", "background"]),
+  }),
+  z.object({
+    type: z.literal("task_progress"),
+    taskId: z.string(),
+    threadId: z.string(),
+    kind: z.enum(["status", "thinking", "message", "tool", "command", "file", "warning"]),
+    title: z.string().max(500),
+    detail: z.string().max(50_000).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
   }),
   z.object({
     type: z.literal("task_completed"),
@@ -92,10 +102,22 @@ export interface MeshTask extends DispatchPayload {
   targetNodeId: string;
   status: TaskStatus;
   selectedThreadId?: string;
+  executionMode?: "desktop" | "background";
+  events?: MeshTaskEvent[];
   result?: string;
   error?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface MeshTaskEvent {
+  id: number;
+  taskId: string;
+  kind: "status" | "thinking" | "message" | "tool" | "command" | "file" | "warning";
+  title: string;
+  detail?: string;
+  payload?: Record<string, unknown>;
+  createdAt: number;
 }
 
 export interface MeshNode {

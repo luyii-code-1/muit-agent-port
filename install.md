@@ -148,6 +148,17 @@ Do not test deployment by editing application source code.
 
 ## 7. Two-phase collaboration rule
 
+### Verify Desktop attachment
+
+1. Keep Codex Desktop running on the target computer and load the existing task that should receive work.
+2. Send a consultation with `routing=exact` and that task ID.
+3. The Relay dashboard should show `Desktop 附着`, and the new turn should appear in the original Desktop task.
+4. The live timeline should show status, Thinking summaries, tool calls, commands, or file events as Codex exposes them.
+
+The Desktop IPC endpoint is `\\.\pipe\codex-ipc` on Windows and `~/.codex/ipc/ipc.sock` on macOS. If Desktop is unavailable or no Desktop window owns the target task, the Bridge reports an IPC error instead of claiming that work is still running.
+
+`routing=new` has no existing Desktop task to attach to, so it intentionally uses the empty-project background mode and is labeled `后台` in the dashboard.
+
 All state-changing delegated work follows two phases:
 
 1. `codex_mesh_delegate`: inspect and discuss current state; no modifications.

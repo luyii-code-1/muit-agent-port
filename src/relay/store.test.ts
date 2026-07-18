@@ -36,14 +36,31 @@ describe("MeshStore", () => {
       createdAt: now,
       updatedAt: now,
     });
-    store.updateTask("task-1", { status: "completed", selectedThreadId: "thread-1", result: "done" });
+    store.updateTask("task-1", {
+      status: "completed",
+      selectedThreadId: "thread-1",
+      executionMode: "desktop",
+      result: "done",
+    });
+    store.appendTaskEvent({
+      taskId: "task-1",
+      kind: "thinking",
+      title: "Thinking",
+      detail: "Inspecting shared styles",
+    });
 
     expect(store.getNode("mac")?.threads[0]?.id).toBe("thread-1");
     expect(store.getTask("task-1")).toMatchObject({
       status: "completed",
       selectedThreadId: "thread-1",
+      executionMode: "desktop",
       result: "done",
     });
+    expect(store.getTask("task-1")?.events).toMatchObject([{
+      kind: "thinking",
+      title: "Thinking",
+      detail: "Inspecting shared styles",
+    }]);
     store.close();
   });
 
