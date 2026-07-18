@@ -1,0 +1,323 @@
+import { EventEmitter } from "node:events";
+import { dirname } from "node:path";
+import { mkdirSync } from "node:fs";
+import Database from "better-sqlite3";
+
+import type { DispatchPayload, MeshNode, MeshTask, ProjectSummary, TaskStatus, ThreadSummary } from "../shared/types.js";
+import { redactSecrets } from "../shared/util.js";
+
+interface TaskRow {
+  id: string;
+  source_node_id: string | null;
+  target_node_id: string;
+  prompt: string;
+  routing: DispatchPayload["routing"];
+  thread_id: string | null;
+  thread_query: string | null;
+  cwd: string | null;
+  metadata_json: string | null;
+  status: TaskStatus;
+  selected_thread_id: string | null;
+  result: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface NodeRow {
+  id: string;
+  hostname: string;
+  platform: string;
+  labels_json: string;
+  connected: number;
+  last_seen_at: number;
+  threads_json: string;
+  token_hash: string | null;
+  projects_json: string;
+}
+
+export class MeshStore {
+  private readonly db: Database.Database;
+  private readonly events = new EventEmitter();
+
+  constructor(path: string) {
+    mkdirSync(dirname(path), { recursive: true });
+    this.db = new Database(path);
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = ON");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS nodes (
+        id TEXT PRIMARY KEY,
+        hostname TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        labels_json TEXT NOT NULL,
+        connected INTEGER NOT NULL DEFAULT 0,
+        last_seen_at INTEGER NOT NULL,
+        threads_json TEXT NOT NULL DEFAULT '[]',
+        token_hash TEXT,
+        projects_json TEXT NOT NULL DEFAULT '[]'
+      );
+
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        source_node_id TEXT,
+        target_node_id TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        routing TEXT NOT NULL,
+        thread_id TEXT,
+        thread_query TEXT,
+        cwd TEXT,
+        metadata_json TEXT,
+        status TEXT NOT NULL,
+        selected_thread_id TEXT,
+        result TEXT,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS tasks_target_status_idx
+      ON tasks(target_node_id, status, created_at);
+
+      CREATE TABLE IF NOT EXISTS pairing_codes (
+        code_hash TEXT PRIMARY KEY,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    const nodeColumns = this.db.pragma("table_info(nodes)") as Array<{ name: string }>;
+    if (!nodeColumns.some((column) => column.name === "token_hash")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN token_hash TEXT");
+    }
+    if (!nodeColumns.some((column) => column.name === "projects_json")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN projects_json TEXT NOT NULL DEFAULT '[]'");
+    }
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  upsertNode(node: Omit<MeshNode, "connected" | "lastSeenAt" | "threads" | "projects">): MeshNode {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO nodes (id, hostname, platform, labels_json, connected, last_seen_at, threads_json)
+      VALUES (@id, @hostname, @platform, @labels, 1, @now, '[]')
+      ON CONFLICT(id) DO UPDATE SET
+        hostname = excluded.hostname,
+        platform = excluded.platform,
+        labels_json = excluded.labels_json,
+        connected = 1,
+        last_seen_at = excluded.last_seen_at
+    `).run({
+      id: node.id,
+      hostname: node.hostname,
+      platform: node.platform,
+      labels: JSON.stringify(node.labels),
+      now,
+    });
+    return this.getNode(node.id)!;
+  }
+
+  setNodeDisconnected(nodeId: string): void {
+    this.db.prepare("UPDATE nodes SET connected = 0, last_seen_at = ? WHERE id = ?").run(Date.now(), nodeId);
+  }
+
+  updateThreads(nodeId: string, threads: ThreadSummary[]): void {
+    this.db.prepare(
+      "UPDATE nodes SET threads_json = ?, last_seen_at = ?, connected = 1 WHERE id = ?",
+    ).run(JSON.stringify(sanitizeThreads(threads)), Date.now(), nodeId);
+  }
+
+  updateInventory(nodeId: string, threads: ThreadSummary[], projects: ProjectSummary[]): void {
+    this.db.prepare(
+      "UPDATE nodes SET threads_json = ?, projects_json = ?, last_seen_at = ?, connected = 1 WHERE id = ?",
+    ).run(JSON.stringify(sanitizeThreads(threads)), JSON.stringify(projects), Date.now(), nodeId);
+  }
+
+  getNode(nodeId: string): MeshNode | undefined {
+    const row = this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(nodeId) as NodeRow | undefined;
+    return row ? this.nodeFromRow(row) : undefined;
+  }
+
+  listNodes(): MeshNode[] {
+    const rows = this.db.prepare("SELECT * FROM nodes ORDER BY connected DESC, last_seen_at DESC").all() as NodeRow[];
+    return rows.map((row) => this.nodeFromRow(row));
+  }
+
+  setNodeTokenHash(nodeId: string, tokenHash: string): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO nodes (id, hostname, platform, labels_json, connected, last_seen_at, threads_json, token_hash)
+      VALUES (?, ?, ?, '[]', 0, ?, '[]', ?)
+      ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, last_seen_at = excluded.last_seen_at
+    `).run(nodeId, nodeId, "unknown", now, tokenHash);
+  }
+
+  getNodeTokenHash(nodeId: string): string | undefined {
+    const row = this.db.prepare("SELECT token_hash FROM nodes WHERE id = ?").get(nodeId) as { token_hash: string | null } | undefined;
+    return row?.token_hash ?? undefined;
+  }
+
+  createPairingCode(codeHash: string, expiresAt: number): void {
+    const now = Date.now();
+    const transaction = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM pairing_codes WHERE expires_at <= ?").run(now);
+      this.db.prepare("INSERT INTO pairing_codes (code_hash, expires_at, created_at) VALUES (?, ?, ?)")
+        .run(codeHash, expiresAt, now);
+    });
+    transaction();
+  }
+
+  consumePairingCode(codeHash: string): boolean {
+    const now = Date.now();
+    const transaction = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM pairing_codes WHERE expires_at <= ?").run(now);
+      const result = this.db.prepare("DELETE FROM pairing_codes WHERE code_hash = ? AND expires_at > ?")
+        .run(codeHash, now);
+      return result.changes === 1;
+    });
+    return transaction();
+  }
+
+  listTasks(limit = 100): MeshTask[] {
+    const rows = this.db.prepare("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?").all(limit) as TaskRow[];
+    return rows.map((row) => this.taskFromRow(row));
+  }
+
+  createTask(task: MeshTask): void {
+    this.db.prepare(`
+      INSERT INTO tasks (
+        id, source_node_id, target_node_id, prompt, routing, thread_id,
+        thread_query, cwd, metadata_json, status, selected_thread_id,
+        result, error, created_at, updated_at
+      ) VALUES (
+        @id, @sourceNodeId, @targetNodeId, @prompt, @routing, @threadId,
+        @threadQuery, @cwd, @metadata, @status, @selectedThreadId,
+        @result, @error, @createdAt, @updatedAt
+      )
+    `).run({
+      id: task.taskId,
+      sourceNodeId: task.sourceNodeId ?? null,
+      targetNodeId: task.targetNodeId,
+      prompt: task.prompt,
+      routing: task.routing,
+      threadId: task.threadId ?? null,
+      threadQuery: task.threadQuery ?? null,
+      cwd: task.cwd ?? null,
+      metadata: task.metadata ? JSON.stringify(task.metadata) : null,
+      status: task.status,
+      selectedThreadId: task.selectedThreadId ?? null,
+      result: task.result ?? null,
+      error: task.error ?? null,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+    });
+    this.events.emit(task.taskId);
+  }
+
+  getTask(taskId: string): MeshTask | undefined {
+    const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as TaskRow | undefined;
+    return row ? this.taskFromRow(row) : undefined;
+  }
+
+  listPendingTasks(nodeId: string): MeshTask[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM tasks
+      WHERE target_node_id = ? AND status IN ('queued', 'dispatched', 'running')
+      ORDER BY created_at ASC
+    `).all(nodeId) as TaskRow[];
+    return rows.map((row) => this.taskFromRow(row));
+  }
+
+  updateTask(
+    taskId: string,
+    patch: Partial<Pick<MeshTask, "status" | "selectedThreadId" | "result" | "error">>,
+  ): MeshTask | undefined {
+    const current = this.getTask(taskId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, updatedAt: Date.now() };
+    this.db.prepare(`
+      UPDATE tasks SET
+        status = @status,
+        selected_thread_id = @selectedThreadId,
+        result = @result,
+        error = @error,
+        updated_at = @updatedAt
+      WHERE id = @id
+    `).run({
+      id: taskId,
+      status: next.status,
+      selectedThreadId: next.selectedThreadId ?? null,
+      result: next.result ?? null,
+      error: next.error ?? null,
+      updatedAt: next.updatedAt,
+    });
+    this.events.emit(taskId);
+    return next;
+  }
+
+  async waitForTask(taskId: string, timeoutMs: number): Promise<MeshTask | undefined> {
+    const current = this.getTask(taskId);
+    if (!current || current.status === "completed" || current.status === "failed" || timeoutMs <= 0) {
+      return current;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, timeoutMs);
+      const listener = (): void => done();
+      const self = this;
+      function done(): void {
+        clearTimeout(timer);
+        self.events.off(taskId, listener);
+        resolve();
+      }
+      this.events.once(taskId, listener);
+      const latest = this.getTask(taskId);
+      if (!latest || latest.updatedAt !== current.updatedAt || latest.status === "completed" || latest.status === "failed") {
+        done();
+      }
+    });
+    return this.getTask(taskId);
+  }
+
+  private nodeFromRow(row: NodeRow): MeshNode {
+    return {
+      id: row.id,
+      hostname: row.hostname,
+      platform: row.platform,
+      labels: JSON.parse(row.labels_json) as string[],
+      connected: row.connected === 1,
+      lastSeenAt: row.last_seen_at,
+      threads: JSON.parse(row.threads_json) as ThreadSummary[],
+      projects: JSON.parse(row.projects_json) as ProjectSummary[],
+    };
+  }
+
+  private taskFromRow(row: TaskRow): MeshTask {
+    return {
+      taskId: row.id,
+      sourceNodeId: row.source_node_id ?? undefined,
+      targetNodeId: row.target_node_id,
+      prompt: row.prompt,
+      routing: row.routing,
+      threadId: row.thread_id ?? undefined,
+      threadQuery: row.thread_query ?? undefined,
+      cwd: row.cwd ?? undefined,
+      metadata: row.metadata_json ? JSON.parse(row.metadata_json) as Record<string, unknown> : undefined,
+      status: row.status,
+      selectedThreadId: row.selected_thread_id ?? undefined,
+      result: row.result ?? undefined,
+      error: row.error ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+}
+
+function sanitizeThreads(threads: ThreadSummary[]): ThreadSummary[] {
+  return threads.map((thread) => ({
+    ...thread,
+    name: thread.name ? redactSecrets(thread.name) : thread.name,
+    preview: redactSecrets(thread.preview),
+  }));
+}

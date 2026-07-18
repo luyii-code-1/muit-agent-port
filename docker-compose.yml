@@ -1,0 +1,17 @@
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      MESH_HOST: 0.0.0.0
+      MESH_PORT: 8787
+      MESH_DB_PATH: /app/data/mesh.db
+      MESH_MCP_TOKEN: ${MESH_MCP_TOKEN:?set MESH_MCP_TOKEN}
+      MESH_BRIDGE_TOKEN: ${MESH_BRIDGE_TOKEN:-}
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - mesh-data:/app/data
+
+volumes:
+  mesh-data:
