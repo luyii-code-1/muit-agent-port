@@ -156,18 +156,15 @@ async function runTask(task: DispatchPayload): Promise<void> {
     const prompt = buildCollaborationPrompt(task);
     let result: string;
     if (selected) {
-      const before = await codex.readThreadDetail(threadId);
-      const previousTurnIds = new Set((before.turns ?? []).map((turn) => turn.id));
       send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "desktop" });
       sendProgress(task.taskId, threadId, "status", "Attached to Codex Desktop task");
-      await desktop.startTurn({
+      const seen = new Set<string>();
+      result = await desktop.runTurn({
         threadId,
         prompt,
         cwd,
         approvalPolicy: config.approvalPolicy,
-      });
-      const seen = new Set<string>();
-      result = await codex.waitForExternalTurn(threadId, previousTurnIds, (progress) => {
+      }, (progress) => {
         const signature = JSON.stringify(progress);
         if (seen.has(signature)) return;
         seen.add(signature);
