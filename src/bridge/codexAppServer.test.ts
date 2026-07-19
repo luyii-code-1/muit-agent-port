@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { finalAgentMessage, mergeTurnItems } from "./codexAppServer.js";
+import { finalAgentMessage, mergeTurnItems, summarizeItemProgress } from "./codexAppServer.js";
 
 describe("finalAgentMessage", () => {
   it("returns the last persisted agent message", () => {
@@ -32,5 +32,28 @@ describe("finalAgentMessage", () => {
       [{ id: "command-1", type: "commandExecution", status: "inProgress" }],
       [{ id: "command-1", type: "commandExecution", status: "completed", output: "OK" }],
     )).toEqual([{ id: "command-1", type: "commandExecution", status: "completed", output: "OK" }]);
+  });
+});
+
+describe("summarizeItemProgress", () => {
+  it("streams completed agent messages to the dashboard", () => {
+    expect(summarizeItemProgress({ type: "agentMessage", text: "Checking Windows state" })).toEqual([{
+      kind: "message",
+      title: "Codex message",
+      detail: "Checking Windows state",
+    }]);
+  });
+
+  it("streams command lifecycle state", () => {
+    expect(summarizeItemProgress({
+      type: "commandExecution",
+      command: "git status",
+      status: "inProgress",
+    })).toEqual([{
+      kind: "command",
+      title: "git status",
+      detail: undefined,
+      payload: { status: "inProgress" },
+    }]);
   });
 });

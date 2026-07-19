@@ -222,14 +222,24 @@ export class CodexAppServer {
     await this.call("thread/resume", { threadId, cwd, approvalPolicy, sandbox });
   }
 
-  async runTurn(options: RunOptions): Promise<string> {
+  async runTurn(options: RunOptions, onProgress?: (progress: CodexProgress) => void): Promise<string> {
     const response = await this.call("turn/start", {
       threadId: options.threadId,
       cwd: options.cwd,
       approvalPolicy: options.approvalPolicy,
       input: [{ type: "text", text: options.prompt }],
     }) as TurnResult;
-    const turn = await this.waitForTurn(response.turn.id);
+    const itemEvent = `item:${response.turn.id}`;
+    const onItem = (item: TurnItem): void => {
+      for (const progress of summarizeItemProgress(item)) onProgress?.(progress);
+    };
+    this.events.on(itemEvent, onItem);
+    let turn: Turn;
+    try {
+      turn = await this.waitForTurn(response.turn.id);
+    } finally {
+      this.events.off(itemEvent, onItem);
+    }
     if (turn.status !== "completed") {
       throw new Error(turn.error?.message ?? `Codex turn ended with status ${turn.status}`);
     }
@@ -289,12 +299,13 @@ export class CodexAppServer {
         });
         return;
       }
-      if (message.method === "item/completed") {
+      if (message.method === "item/started" || message.method === "item/completed") {
         const turnId = message.params?.turnId;
         const item = message.params?.item as TurnItem | undefined;
         if (typeof turnId === "string" && item) {
           const items = this.completedItems.get(turnId) ?? [];
           this.completedItems.set(turnId, mergeTurnItems(items, [item]));
+          this.events.emit(`item:${turnId}`, item);
         }
       } else if (message.method === "turn/completed") {
         const turn = message.params?.turn as Turn | undefined;
@@ -381,23 +392,30 @@ export function mergeTurnItems(streamed: TurnItem[], completed: TurnItem[]): Tur
 
 export function summarizeTurnProgress(turn: Turn): CodexProgress[] {
   const progress: CodexProgress[] = [{ kind: "status", title: `Turn ${turn.status}` }];
-  for (const item of turn.items) {
-    const detail = item.text ?? item.aggregatedOutput ?? item.output;
-    if (item.type === "reasoning") {
-      const summary = textFromUnknown(item.summary) || detail;
-      if (summary) progress.push({ kind: "thinking", title: "Thinking", detail: summary });
-    } else if (item.type === "agentMessage" && detail) {
-      progress.push({ kind: "message", title: "Codex message", detail });
-    } else if (item.type === "commandExecution") {
-      const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
-      progress.push({ kind: "command", title: command || "Command", detail, payload: item.status ? { status: item.status } : undefined });
-    } else if (item.type === "fileChange") {
-      progress.push({ kind: "file", title: item.path || item.title || "File change", detail: textFromUnknown(item.changes) || detail });
-    } else if (/tool|mcp/i.test(item.type)) {
-      progress.push({ kind: "tool", title: item.title || item.name || item.type, detail });
-    }
-  }
+  for (const item of turn.items) progress.push(...summarizeItemProgress(item));
   return progress;
+}
+
+export function summarizeItemProgress(item: TurnItem): CodexProgress[] {
+  const detail = item.text ?? item.aggregatedOutput ?? item.output;
+  if (item.type === "reasoning") {
+    const summary = textFromUnknown(item.summary) || detail;
+    return summary ? [{ kind: "thinking", title: "Thinking", detail: summary }] : [];
+  }
+  if (item.type === "agentMessage" && detail) {
+    return [{ kind: "message", title: "Codex message", detail }];
+  }
+  if (item.type === "commandExecution") {
+    const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
+    return [{ kind: "command", title: command || "Command", detail, payload: item.status ? { status: item.status } : undefined }];
+  }
+  if (item.type === "fileChange") {
+    return [{ kind: "file", title: item.path || item.title || "File change", detail: textFromUnknown(item.changes) || detail }];
+  }
+  if (/tool|mcp/i.test(item.type)) {
+    return [{ kind: "tool", title: item.title || item.name || item.type, detail }];
+  }
+  return [];
 }
 
 function textFromUnknown(value: unknown): string | undefined {

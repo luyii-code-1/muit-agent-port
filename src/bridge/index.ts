@@ -161,7 +161,8 @@ async function runTask(task: DispatchPayload): Promise<void> {
     activeTasks.set(task.taskId, threadId);
     const prompt = buildCollaborationPrompt(task);
     let result: string;
-    if (selected) {
+    const useBackground = !selected || task.metadata?.meshExecutionMode === "background";
+    if (!useBackground) {
       send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "desktop" });
       sendProgress(task.taskId, threadId, "status", "Attached to Codex Desktop task");
       const seen = new Set<string>();
@@ -177,9 +178,23 @@ async function runTask(task: DispatchPayload): Promise<void> {
         sendProgress(task.taskId, threadId!, progress.kind, progress.title, progress.detail, progress.payload);
       });
     } else {
+      if (selected) {
+        await codex.resumeThread(threadId, cwd, config.approvalPolicy, config.sandbox);
+      }
       send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "background" });
-      sendProgress(task.taskId, threadId, "warning", "New empty-project task uses background app-server mode");
-      result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt });
+      sendProgress(
+        task.taskId,
+        threadId,
+        "status",
+        selected ? "Continued background app-server task" : "New empty-project task uses background app-server mode",
+      );
+      const seen = new Set<string>();
+      result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt }, (progress) => {
+        const signature = JSON.stringify(progress);
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        sendProgress(task.taskId, threadId!, progress.kind, progress.title, progress.detail, progress.payload);
+      });
     }
     ledger.update(task.taskId, "completed", { threadId, result });
     if (!cancelledIds.has(task.taskId)) send({ type: "task_completed", taskId: task.taskId, threadId, result });

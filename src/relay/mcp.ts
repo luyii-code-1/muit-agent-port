@@ -186,6 +186,9 @@ export class MeshMcpService {
         }
         const node = this.store.getNode(input.target_node_id);
         if (!node) return errorResult(`Unknown target node: ${input.target_node_id}`);
+        const priorExecutionMode = input.routing === "exact" && input.thread_id
+          ? executionModeForThread(this.store.listTasks(100), input.thread_id)
+          : undefined;
 
         const now = Date.now();
         const task: MeshTask = {
@@ -199,6 +202,7 @@ export class MeshMcpService {
           cwd: input.cwd,
           metadata: {
             ...input.metadata,
+            ...(priorExecutionMode ? { meshExecutionMode: priorExecutionMode } : {}),
             meshPhase: "consultation",
           },
           status: "queued",
@@ -245,6 +249,10 @@ export class MeshMcpService {
         }
         const now = Date.now();
         const resolvedConfirmation = confirmation ?? "现状已确认，按讨论后的方案执行。";
+        const consultationExecutionMode = consultation.executionMode === "background"
+          || consultation.metadata?.meshExecutionMode === "background"
+          ? "background"
+          : undefined;
         const executionPrompt = [
           "[Explicit follow-up confirmation after Codex-to-Codex consultation]",
           "The consultation has completed. This message explicitly authorizes execution in the same conversation.",
@@ -268,6 +276,7 @@ export class MeshMcpService {
           cwd: consultation.cwd,
           metadata: {
             meshPhase: "execution",
+            ...(consultationExecutionMode ? { meshExecutionMode: consultationExecutionMode } : {}),
             consultationTaskId: consultation.taskId,
             remoteAssessment: consultation.result,
             originalPrompt: consultation.prompt,
@@ -379,6 +388,11 @@ function result(value: unknown) {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: value as Record<string, unknown>,
   };
+}
+
+export function executionModeForThread(tasks: MeshTask[], threadId: string): "background" | undefined {
+  const latest = tasks.find((task) => task.selectedThreadId === threadId);
+  return latest?.executionMode === "background" ? "background" : undefined;
 }
 
 function errorResult(message: string) {
