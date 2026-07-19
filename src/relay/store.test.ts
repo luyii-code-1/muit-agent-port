@@ -17,6 +17,7 @@ describe("MeshStore", () => {
     tempDirs.push(dir);
     const store = new MeshStore(join(dir, "mesh.db"));
     store.upsertNode({ id: "mac", hostname: "Mac", platform: "darwin", labels: ["frontend"] });
+    store.setNodeRoles("mac", ["iOS", " UI ", "iOS"], "manual");
     store.updateThreads("mac", [{
       id: "thread-1",
       name: "UI",
@@ -56,6 +57,7 @@ describe("MeshStore", () => {
     });
 
     expect(store.getNode("mac")?.threads[0]?.id).toBe("thread-1");
+    expect(store.getNode("mac")).toMatchObject({ roles: ["iOS", "UI"], roleSource: "manual" });
     expect(store.getTask("task-1")).toMatchObject({
       status: "completed",
       selectedThreadId: "thread-1",

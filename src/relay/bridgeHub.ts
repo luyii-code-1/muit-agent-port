@@ -88,12 +88,15 @@ export class BridgeHub {
           const previous = this.sockets.get(hello.nodeId);
           if (previous && previous !== socket) previous.close(4002, "replaced by a newer connection");
           this.sockets.set(hello.nodeId, socket);
-          this.store.upsertNode({
+          const registeredNode = this.store.upsertNode({
             id: hello.nodeId,
             hostname: hello.hostname,
             platform: hello.platform,
             labels: hello.labels,
           });
+          if (hello.roles.length > 0 && !registeredNode.roleSource) {
+            this.store.setNodeRoles(hello.nodeId, hello.roles, "manual");
+          }
           this.send(socket, { type: "hello_ack", nodeId: hello.nodeId });
           for (const task of this.store.listPendingTasks(hello.nodeId)) this.dispatch(task);
           return;
@@ -136,6 +139,10 @@ export class BridgeHub {
               result: message.result,
               error: undefined,
             });
+            if (taskRequestsRoleSummary(this.store.getTask(message.taskId))) {
+              const roles = parseRoleSummary(message.result);
+              if (roles.length > 0) this.store.setNodeRoles(nodeId, roles, "codex");
+            }
             break;
           case "task_failed":
             this.store.updateTask(message.taskId, {
@@ -177,5 +184,24 @@ export class BridgeHub {
 
   private send(socket: WebSocket, message: RelayToBridge): void {
     socket.send(JSON.stringify(message));
+  }
+}
+
+function taskRequestsRoleSummary(task: MeshTask | undefined): boolean {
+  return task?.metadata?.meshSystemAction === "summarize-node-role";
+}
+
+export function parseRoleSummary(result: string): string[] {
+  const match = result.match(/ROLE_LABELS_JSON\s*:\s*(\[[^\r\n]*\])/i);
+  if (!match?.[1]) return [];
+  try {
+    const value = JSON.parse(match[1]) as unknown;
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0 && item.length <= 80))].slice(0, 12);
+  } catch {
+    return [];
   }
 }

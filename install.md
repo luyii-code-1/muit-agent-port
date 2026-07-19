@@ -74,6 +74,13 @@ Open `http://<relay-address>:8787/` on the private network. Use HTTPS/WSS throug
 
 ## 4. Pair each Bridge
 
+The preferred workflow is the Relay Web console's **Node management** screen. It can generate either:
+
+- a user-level one-click installer for Windows, macOS, or Linux; or
+- an `INSTALL-<node-id>.md` prompt that a Codex on the target computer can follow.
+
+Both methods use a single-use pairing code and install outside code repositories. Never reuse an expired generated kit; generate a fresh one from the Web console.
+
 Generate a six-digit one-time pairing code from the Relay dashboard or with `codex_mesh_pairing_code`.
 
 Mac/Linux example:
@@ -106,6 +113,7 @@ MESH_INBOX_ROOT
 MESH_ALLOWED_ROOTS
 MESH_CODEX_COMMAND
 MESH_BRIDGE_DB_PATH
+MESH_NODE_ROLES=<comma-separated initial responsibility roles>
 MESH_APPROVAL_POLICY=never
 MESH_SANDBOX=workspace-write
 ```
@@ -119,6 +127,8 @@ Use the operating system's normal user-level service manager to keep the Bridge 
 - Linux: systemd user service
 
 Run the service as the same user whose Codex Desktop/CLI is authenticated. Preserve the generated credentials file and local Bridge ledger across upgrades.
+
+After the node connects, set its Role labels in **Node management**. Role labels describe responsibility rather than hardware or OS, for example `Android`, `ESP32 Firmware`, `BLE Protocol`, `UI`, or `Release`. They can be entered manually or generated with **Codex summarize**. Automatic summarization is read-only, runs in a new empty-project background task, and must return a structured `ROLE_LABELS_JSON` marker; the Relay ignores unstructured prose.
 
 ## 5. Add the Relay MCP server to Codex
 

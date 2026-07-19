@@ -6,6 +6,7 @@ const optionToEnv: Record<string, string> = {
   "--inbox": "MESH_INBOX_ROOT",
   "--roots": "MESH_ALLOWED_ROOTS",
   "--labels": "MESH_NODE_LABELS",
+  "--roles": "MESH_NODE_ROLES",
   "--codex": "MESH_CODEX_COMMAND",
   "--credentials": "MESH_CREDENTIALS_PATH",
 };
@@ -25,6 +26,7 @@ Options:
   --inbox PATH         Empty-project inbox for routing=new
   --roots A,B          Allowed project roots (defaults to cwd)
   --labels A,B         Searchable node labels
+  --roles A,B          Initial responsibility Role labels
   --codex PATH         Codex executable path
   --credentials PATH   Saved credential file path
 `);

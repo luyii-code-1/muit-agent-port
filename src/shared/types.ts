@@ -42,6 +42,7 @@ export const bridgeHelloSchema = z.object({
   hostname: z.string().max(255),
   platform: z.string().max(80),
   labels: z.array(z.string().max(80)).max(50),
+  roles: z.array(z.string().max(80)).max(20).default([]),
   version: z.string(),
 });
 
@@ -132,6 +133,9 @@ export interface MeshNode {
   hostname: string;
   platform: string;
   labels: string[];
+  roles: string[];
+  roleSource?: "manual" | "codex";
+  roleUpdatedAt?: number;
   connected: boolean;
   lastSeenAt: number;
   threads: ThreadSummary[];

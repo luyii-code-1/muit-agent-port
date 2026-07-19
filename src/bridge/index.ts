@@ -66,6 +66,7 @@ async function connectOnce(): Promise<void> {
         hostname: config.nodeHostname,
         platform: config.nodePlatform || platform(),
         labels: config.labels,
+        roles: config.roles,
         version: "0.1.0",
       });
     });

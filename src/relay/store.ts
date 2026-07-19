@@ -35,6 +35,9 @@ interface NodeRow {
   threads_json: string;
   token_hash: string | null;
   projects_json: string;
+  roles_json: string;
+  role_source: "manual" | "codex" | null;
+  role_updated_at: number | null;
 }
 
 export class MeshStore {
@@ -56,7 +59,10 @@ export class MeshStore {
         last_seen_at INTEGER NOT NULL,
         threads_json TEXT NOT NULL DEFAULT '[]',
         token_hash TEXT,
-        projects_json TEXT NOT NULL DEFAULT '[]'
+        projects_json TEXT NOT NULL DEFAULT '[]',
+        roles_json TEXT NOT NULL DEFAULT '[]',
+        role_source TEXT,
+        role_updated_at INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS tasks (
@@ -106,6 +112,15 @@ export class MeshStore {
     if (!nodeColumns.some((column) => column.name === "projects_json")) {
       this.db.exec("ALTER TABLE nodes ADD COLUMN projects_json TEXT NOT NULL DEFAULT '[]'");
     }
+    if (!nodeColumns.some((column) => column.name === "roles_json")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN roles_json TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!nodeColumns.some((column) => column.name === "role_source")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN role_source TEXT");
+    }
+    if (!nodeColumns.some((column) => column.name === "role_updated_at")) {
+      this.db.exec("ALTER TABLE nodes ADD COLUMN role_updated_at INTEGER");
+    }
     const taskColumns = this.db.pragma("table_info(tasks)") as Array<{ name: string }>;
     if (!taskColumns.some((column) => column.name === "execution_mode")) {
       this.db.exec("ALTER TABLE tasks ADD COLUMN execution_mode TEXT");
@@ -116,7 +131,7 @@ export class MeshStore {
     this.db.close();
   }
 
-  upsertNode(node: Omit<MeshNode, "connected" | "lastSeenAt" | "threads" | "projects">): MeshNode {
+  upsertNode(node: Omit<MeshNode, "connected" | "lastSeenAt" | "threads" | "projects" | "roles" | "roleSource" | "roleUpdatedAt">): MeshNode {
     const now = Date.now();
     this.db.prepare(`
       INSERT INTO nodes (id, hostname, platform, labels_json, connected, last_seen_at, threads_json)
@@ -161,6 +176,16 @@ export class MeshStore {
   listNodes(): MeshNode[] {
     const rows = this.db.prepare("SELECT * FROM nodes ORDER BY connected DESC, last_seen_at DESC").all() as NodeRow[];
     return rows.map((row) => this.nodeFromRow(row));
+  }
+
+  setNodeRoles(nodeId: string, roles: string[], source: "manual" | "codex"): MeshNode | undefined {
+    const normalized = normalizeRoles(roles);
+    const result = this.db.prepare(
+      "UPDATE nodes SET roles_json = ?, role_source = ?, role_updated_at = ? WHERE id = ?",
+    ).run(JSON.stringify(normalized), source, Date.now(), nodeId);
+    if (result.changes === 0) return undefined;
+    this.emitChange(`node:${nodeId}`);
+    return this.getNode(nodeId);
   }
 
   setNodeTokenHash(nodeId: string, tokenHash: string): void {
@@ -369,6 +394,9 @@ export class MeshStore {
       hostname: row.hostname,
       platform: row.platform,
       labels: JSON.parse(row.labels_json) as string[],
+      roles: JSON.parse(row.roles_json || "[]") as string[],
+      roleSource: row.role_source ?? undefined,
+      roleUpdatedAt: row.role_updated_at ?? undefined,
       connected: row.connected === 1,
       lastSeenAt: row.last_seen_at,
       threads: JSON.parse(row.threads_json) as ThreadSummary[],
@@ -421,6 +449,10 @@ export class MeshStore {
     this.events.emit(taskId);
     this.events.emit("change", taskId);
   }
+}
+
+function normalizeRoles(roles: string[]): string[] {
+  return [...new Set(roles.map((role) => role.trim()).filter(Boolean))].slice(0, 20);
 }
 
 function sanitizeThreads(threads: ThreadSummary[]): ThreadSummary[] {

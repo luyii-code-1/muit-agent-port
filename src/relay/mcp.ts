@@ -89,7 +89,7 @@ export class MeshMcpService {
       "codex_mesh_nodes",
       {
         title: "List Codex mesh computers",
-        description: "List registered computers, connectivity, labels, and cached thread counts.",
+        description: "List registered computers, connectivity, system labels, user/Codex-managed Role labels, and cached thread counts. Use Roles to choose the most suitable computer.",
         inputSchema: {},
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
