@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { z } from "zod";
 import type { MeshNode, MeshTask } from "../shared/types.js";
@@ -7,6 +8,7 @@ import { redactSecrets } from "../shared/util.js";
 import { BridgeHub } from "./bridgeHub.js";
 import { loadRelayConfig } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
+import { buildInstallKit } from "./installKit.js";
 import { MeshMcpService } from "./mcp.js";
 import { PairingService } from "./pairing.js";
 import { MeshStore } from "./store.js";
@@ -44,7 +46,91 @@ app.get("/api/snapshot", (_request, response) => {
     memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
   });
 });
+app.get("/api/events", (request, response) => {
+  response.status(200);
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.write(`event: ready\ndata: {}\n\n`);
+  const unsubscribe = store.subscribe((taskId) => {
+    response.write(`event: task\ndata: ${JSON.stringify({ taskId })}\n\n`);
+  });
+  const ping = setInterval(() => response.write(`: ping\n\n`), 20_000);
+  request.on("close", () => {
+    clearInterval(ping);
+    unsubscribe();
+  });
+});
 app.post("/api/pairing-code", (_request, response) => response.json(pairing.createCode(10)));
+app.patch("/api/nodes/:nodeId/roles", (request, response) => {
+  const parsed = z.object({
+    roles: z.array(z.string().trim().min(1).max(80)).max(20),
+  }).safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Role labels must be an array of short strings" });
+    return;
+  }
+  const node = store.setNodeRoles(request.params.nodeId, parsed.data.roles, "manual");
+  if (!node) {
+    response.status(404).json({ error: "Node not found" });
+    return;
+  }
+  response.json({ node: safeNode(node) });
+});
+app.post("/api/nodes/:nodeId/summarize-role", (request, response) => {
+  const node = store.getNode(request.params.nodeId);
+  if (!node) {
+    response.status(404).json({ error: "Node not found" });
+    return;
+  }
+  if (!node.connected) {
+    response.status(409).json({ error: "Node must be online for local Codex role summarization" });
+    return;
+  }
+  const projectContext = node.projects.slice(0, 100)
+    .map((project) => `- ${project.name}: ${project.path} [${project.markers.join(", ")}]`)
+    .join("\n");
+  const now = Date.now();
+  const task: MeshTask = {
+    taskId: randomUUID(),
+    targetNodeId: node.id,
+    sourceNodeId: "Relay Web",
+    prompt: `This is a read-only node Role summarization. Do not modify files or system state.\n\nReview this computer's visible Codex projects and, when useful, perform only harmless local inspection to summarize what this computer/agent is responsible for. Produce 2-8 concise searchable Role labels, such as Android, ESP32 Firmware, BLE Protocol, UI, Backend, Testing, or Release. Do not include the OS/hostname as a Role.\n\nKnown project inventory:\n${projectContext || "(no indexed projects yet)"}\n\nYour final response MUST contain exactly one machine-readable line in this format:\nROLE_LABELS_JSON: ["Role A", "Role B"]\nThen finish with READY.`,
+    routing: "new",
+    metadata: { meshPhase: "system", meshSystemAction: "summarize-node-role" },
+    status: "queued",
+    createdAt: now,
+    updatedAt: now,
+  };
+  store.createTask(task);
+  const delivered = hub.dispatch(task);
+  response.status(202).json({ delivered, task: safeTask(store.getTask(task.taskId) ?? task) });
+});
+app.post("/api/node-install-kit", (request, response) => {
+  const parsed = z.object({
+    platform: z.enum(["windows", "macos", "linux"]),
+    nodeId: z.string().regex(/^[a-zA-Z0-9._-]{1,80}$/),
+    roles: z.array(z.string().trim().min(1).max(80)).max(20).default([]),
+  }).safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: "Invalid node installation settings" });
+    return;
+  }
+  if (store.getNode(parsed.data.nodeId)) {
+    response.status(409).json({ error: "Node ID already exists; choose a unique ID" });
+    return;
+  }
+  const code = pairing.createCode(30);
+  const kit = buildInstallKit({
+    platform: parsed.data.platform,
+    nodeId: parsed.data.nodeId,
+    roles: parsed.data.roles,
+    pairingCode: code.code,
+    relayHttpUrl: publicRelayUrl(request),
+  });
+  response.json({ ...kit, expiresAt: code.expiresAt, nodeId: parsed.data.nodeId });
+});
 app.post("/pair", (request, response) => {
   const address = request.ip || request.socket.remoteAddress || "unknown";
   const now = Date.now();
@@ -129,4 +215,13 @@ function safeTask(task: MeshTask): MeshTask {
       ? JSON.parse(redactSecrets(JSON.stringify(task.metadata))) as Record<string, unknown>
       : undefined,
   };
+}
+
+function publicRelayUrl(request: express.Request): string {
+  const forwardedProto = request.header("x-forwarded-proto")?.split(",")[0]?.trim();
+  const protocol = forwardedProto || request.protocol;
+  const host = request.header("x-forwarded-host")?.split(",")[0]?.trim()
+    || request.header("host")
+    || `${config.host}:${config.port}`;
+  return `${protocol}://${host}`;
 }

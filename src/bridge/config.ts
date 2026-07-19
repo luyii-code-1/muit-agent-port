@@ -16,6 +16,7 @@ export interface BridgeConfig {
   nodeHostname: string;
   nodePlatform: string;
   labels: string[];
+  roles: string[];
   defaultCwd: string;
   inboxRoot: string;
   allowedRoots: string[];
@@ -77,6 +78,7 @@ export function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): BridgeCo
     nodeHostname: hostname(),
     nodePlatform: platform(),
     labels: (env.MESH_NODE_LABELS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+    roles: (env.MESH_NODE_ROLES ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     defaultCwd,
     inboxRoot,
     allowedRoots,

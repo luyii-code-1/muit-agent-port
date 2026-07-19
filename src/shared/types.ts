@@ -42,6 +42,7 @@ export const bridgeHelloSchema = z.object({
   hostname: z.string().max(255),
   platform: z.string().max(80),
   labels: z.array(z.string().max(80)).max(50),
+  roles: z.array(z.string().max(80)).max(20).default([]),
   version: z.string(),
 });
 
@@ -56,6 +57,16 @@ export const bridgeToRelaySchema = z.discriminatedUnion("type", [
     type: z.literal("task_started"),
     taskId: z.string(),
     threadId: z.string(),
+    executionMode: z.enum(["desktop", "background"]),
+  }),
+  z.object({
+    type: z.literal("task_progress"),
+    taskId: z.string(),
+    threadId: z.string(),
+    kind: z.enum(["status", "thinking", "message", "tool", "command", "file", "warning"]),
+    title: z.string().max(500),
+    detail: z.string().max(50_000).optional(),
+    payload: z.record(z.string(), z.unknown()).optional(),
   }),
   z.object({
     type: z.literal("task_completed"),
@@ -69,6 +80,11 @@ export const bridgeToRelaySchema = z.discriminatedUnion("type", [
     threadId: z.string().optional(),
     error: z.string().max(20_000),
   }),
+  z.object({
+    type: z.literal("task_cancelled"),
+    taskId: z.string(),
+    threadId: z.string().optional(),
+  }),
 ]);
 
 export type BridgeToRelay = z.infer<typeof bridgeToRelaySchema>;
@@ -76,6 +92,7 @@ export type BridgeToRelay = z.infer<typeof bridgeToRelaySchema>;
 export const relayToBridgeSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("hello_ack"), nodeId: z.string() }),
   z.object({ type: z.literal("dispatch"), task: dispatchPayloadSchema }),
+  z.object({ type: z.literal("cancel"), taskId: z.string(), threadId: z.string().optional() }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 
@@ -86,16 +103,29 @@ export type TaskStatus =
   | "dispatched"
   | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface MeshTask extends DispatchPayload {
   targetNodeId: string;
   status: TaskStatus;
   selectedThreadId?: string;
+  executionMode?: "desktop" | "background";
+  events?: MeshTaskEvent[];
   result?: string;
   error?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface MeshTaskEvent {
+  id: number;
+  taskId: string;
+  kind: "status" | "thinking" | "message" | "tool" | "command" | "file" | "warning";
+  title: string;
+  detail?: string;
+  payload?: Record<string, unknown>;
+  createdAt: number;
 }
 
 export interface MeshNode {
@@ -103,6 +133,9 @@ export interface MeshNode {
   hostname: string;
   platform: string;
   labels: string[];
+  roles: string[];
+  roleSource?: "manual" | "codex";
+  roleUpdatedAt?: number;
   connected: boolean;
   lastSeenAt: number;
   threads: ThreadSummary[];

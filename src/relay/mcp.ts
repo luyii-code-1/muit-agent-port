@@ -12,7 +12,7 @@ import type { RelayConfig } from "./config.js";
 import type { PairingService } from "./pairing.js";
 import type { MeshStore } from "./store.js";
 
-const TERMINAL_STATUSES = new Set(["completed", "failed"]);
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export class MeshMcpService {
   private readonly transports = new Map<string, StreamableHTTPServerTransport>();
@@ -89,7 +89,7 @@ export class MeshMcpService {
       "codex_mesh_nodes",
       {
         title: "List Codex mesh computers",
-        description: "List registered computers, connectivity, labels, and cached thread counts.",
+        description: "List registered computers, connectivity, system labels, user/Codex-managed Role labels, and cached thread counts. Use Roles to choose the most suitable computer.",
         inputSchema: {},
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
@@ -186,6 +186,9 @@ export class MeshMcpService {
         }
         const node = this.store.getNode(input.target_node_id);
         if (!node) return errorResult(`Unknown target node: ${input.target_node_id}`);
+        const priorExecutionMode = input.routing === "exact" && input.thread_id
+          ? executionModeForThread(this.store.listTasks(100), input.thread_id)
+          : undefined;
 
         const now = Date.now();
         const task: MeshTask = {
@@ -199,6 +202,7 @@ export class MeshMcpService {
           cwd: input.cwd,
           metadata: {
             ...input.metadata,
+            ...(priorExecutionMode ? { meshExecutionMode: priorExecutionMode } : {}),
             meshPhase: "consultation",
           },
           status: "queued",
@@ -245,6 +249,10 @@ export class MeshMcpService {
         }
         const now = Date.now();
         const resolvedConfirmation = confirmation ?? "现状已确认，按讨论后的方案执行。";
+        const consultationExecutionMode = consultation.executionMode === "background"
+          || consultation.metadata?.meshExecutionMode === "background"
+          ? "background"
+          : undefined;
         const executionPrompt = [
           "[Explicit follow-up confirmation after Codex-to-Codex consultation]",
           "The consultation has completed. This message explicitly authorizes execution in the same conversation.",
@@ -268,6 +276,7 @@ export class MeshMcpService {
           cwd: consultation.cwd,
           metadata: {
             meshPhase: "execution",
+            ...(consultationExecutionMode ? { meshExecutionMode: consultationExecutionMode } : {}),
             consultationTaskId: consultation.taskId,
             remoteAssessment: consultation.result,
             originalPrompt: consultation.prompt,
@@ -287,6 +296,26 @@ export class MeshMcpService {
           consultation: redactSecrets(consultation.result),
           task: current ? safeTask(current) : undefined,
         });
+      },
+    );
+
+    server.registerTool(
+      "codex_mesh_cancel",
+      {
+        title: "Cancel a Codex mesh task",
+        description: "Interrupt the Desktop turn associated with a mesh task and mark it cancelled. This also works for a stale task whose Relay status is already failed.",
+        inputSchema: {
+          task_id: z.string().min(1),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      },
+      async ({ task_id }) => {
+        const task = this.store.getTask(task_id);
+        if (!task) return errorResult(`Unknown task: ${task_id}`);
+        const delivered = this.hub.cancel(task);
+        if (!delivered) return errorResult(`Target node is offline; task was not interrupted: ${task.targetNodeId}`);
+        const cancelled = this.store.updateTask(task_id, { status: "cancelled", error: undefined });
+        return result({ delivered, task: cancelled ? safeTask(cancelled) : undefined });
       },
     );
 
@@ -359,6 +388,11 @@ function result(value: unknown) {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: value as Record<string, unknown>,
   };
+}
+
+export function executionModeForThread(tasks: MeshTask[], threadId: string): "background" | undefined {
+  const latest = tasks.find((task) => task.selectedThreadId === threadId);
+  return latest?.executionMode === "background" ? "background" : undefined;
 }
 
 function errorResult(message: string) {

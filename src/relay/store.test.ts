@@ -17,6 +17,7 @@ describe("MeshStore", () => {
     tempDirs.push(dir);
     const store = new MeshStore(join(dir, "mesh.db"));
     store.upsertNode({ id: "mac", hostname: "Mac", platform: "darwin", labels: ["frontend"] });
+    store.setNodeRoles("mac", ["iOS", " UI ", "iOS"], "manual");
     store.updateThreads("mac", [{
       id: "thread-1",
       name: "UI",
@@ -36,14 +37,38 @@ describe("MeshStore", () => {
       createdAt: now,
       updatedAt: now,
     });
-    store.updateTask("task-1", { status: "completed", selectedThreadId: "thread-1", result: "done" });
+    store.updateTask("task-1", {
+      status: "completed",
+      selectedThreadId: "thread-1",
+      executionMode: "desktop",
+      result: "done",
+    });
+    store.appendTaskEvent({
+      taskId: "task-1",
+      kind: "thinking",
+      title: "Thinking",
+      detail: "Inspecting shared styles",
+    });
+    store.appendTaskEvent({
+      taskId: "task-1",
+      kind: "thinking",
+      title: "Thinking",
+      detail: "Inspecting shared styles and controls",
+    });
 
     expect(store.getNode("mac")?.threads[0]?.id).toBe("thread-1");
+    expect(store.getNode("mac")).toMatchObject({ roles: ["iOS", "UI"], roleSource: "manual" });
     expect(store.getTask("task-1")).toMatchObject({
       status: "completed",
       selectedThreadId: "thread-1",
+      executionMode: "desktop",
       result: "done",
     });
+    expect(store.getTask("task-1")?.events).toMatchObject([{
+      kind: "thinking",
+      title: "Thinking",
+      detail: "Inspecting shared styles and controls",
+    }]);
     store.close();
   });
 

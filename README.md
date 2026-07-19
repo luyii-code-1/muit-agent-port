@@ -27,9 +27,13 @@ Codex A -- MCP /mcp --> Relay <-- WSS /bridge -- Bridge B -- stdio --> codex app
   - `best`：按 `cwd`、`thread_query`、空闲状态和活跃时间选择；无合适对话时新建；
   - `new`：始终创建新对话。
 - `codex_mesh_task`：查询或短暂等待远程结果。
+- 对已有任务的委派优先通过 Codex Desktop 本机 IPC 附着到原任务，由 Desktop 自身启动 turn。
+- Relay 网页通过 SSE 显示实时状态、可公开的 Thinking 摘要、工具调用、命令和文件修改过程。
 - `codex_mesh_activity`：通过 Tool Call 查看最近的 Codex 间协作提示和结果。
 - `codex_mesh_pairing_code`：通过 Tool Call 生成 6 位一次性节点配对码。
 - Relay 首页提供轻量控制台，显示电脑、Codex 对话标题、任务提示、状态和返回结果。
+- Web 节点管理支持生成一次性配对方案、Windows/macOS/Linux 一键安装脚本，以及可下载的 AI 自部署 Markdown。
+- 每个节点拥有独立的 Role 标签；Role 可在 Web 手动维护，也可让该电脑的本机 Codex 只读扫描项目后自动总结。
 - 目标电脑离线时持久排队，重连后投递。
 - Relay Bearer Token、每节点独立 Token、目录白名单和本地任务账本。
 - Bridge 重启后不会自动重复执行中断任务，避免重复修改代码；中断任务会返回失败，可由发起方明确重新委派。
@@ -41,6 +45,8 @@ Codex A -- MCP /mcp --> Relay <-- WSS /bridge -- Bridge B -- stdio --> codex app
 - 生产网络中为 Relay 配置 HTTPS/WSS（Caddy、Nginx、Cloudflare Tunnel 或私有组网均可）
 
 ## 1. 安装
+
+需要让 AI 在新电脑上完成安全部署、配对和验证时，使用 [`install.md`](install.md)。
 
 ```bash
 npm install
@@ -111,6 +117,17 @@ npm run pair:bridge -- --relay ws://10.0.0.10:8787/bridge --node workstation --c
 
 配对码单次使用、默认 10 分钟失效。成功后 Bridge Token 会以 `0600` 权限保存到 `./data/bridge-credentials.json`，后续不再需要配对码。若 Relay 位于公网，把地址改成 `wss://`。
 
+### 从 Web 添加和管理节点
+
+打开 Relay 首页，登录后选择 **节点管理 → 添加节点**：
+
+1. 选择 Windows、macOS 或 Linux；
+2. 填写唯一节点 ID 和初始 Role 标签；
+3. 选择复制/下载“一键脚本”，或下载 `INSTALL-<node-id>.md` 交给目标电脑上的 Codex；
+4. 生成的方案内含一个 30 分钟有效、仅能使用一次的配对码；过期后重新生成即可。
+
+已经连接的节点可在同一页面编辑 Role。系统标签（如 `windows`、`macos`）由 Bridge 上报，Role（如 `Android`、`ESP32 Firmware`、`BLE Protocol`）由 Relay 独立持久保存，因此 Bridge 重启不会覆盖 Role。点击 **Codex 总结** 会在该节点创建隔离的只读后台任务，由本机 Codex 根据可见项目总结 2–8 个 Role；任务过程仍显示在 Web 协作记录中。
+
 `MESH_ALLOWED_ROOTS` 是远程任务能进入的目录边界。建议列出具体项目根目录，不要设置为 `/`、用户主目录或整个磁盘。`MESH_INBOX_ROOT` 必须在白名单内，默认是 `<MESH_DEFAULT_CWD>/.codex-mesh/inbox`。Bridge 默认串行执行任务；确认任务会落在不同对话后，可用 `MESH_BRIDGE_CONCURRENCY` 提高并发。同一对话不应同时执行多个 turn。
 
 ## 4. 将 Relay 接入每台 Codex
@@ -168,10 +185,16 @@ Codex 会组合调用：
 
 ## 路由规则
 
+### Desktop 附着模式
+
+当路由选中了已有任务（`exact` 或成功匹配的 `best`）时，Bridge 会连接本机 Codex Desktop IPC：macOS 为 `~/.codex/ipc/ipc.sock`，Windows 为 `\\.\pipe\codex-ipc`。Desktop 必须正在运行并能持有目标任务；否则任务会明确失败，不再静默切换到不可见的后台 turn。
+
+`routing=new` 仍会在空白收件箱项目中创建后台 app-server 任务，因为它没有可附着的 Desktop 任务。网页会明确标记“后台”。Thinking 只显示 Codex 提供的推理摘要，不显示隐藏的内部推理原文。
+
 - `exact` 只接受目标电脑真实存在的 `thread_id`，不存在就失败，不会静默投到其他对话。
 - `best` 先严格匹配 `cwd`，再匹配 `thread_query` 的标题/首条消息关键词，然后参考空闲状态和最近更新时间。
 - 当 `best` 没有满足约束的候选时，也会按新对话处理，在 Mesh inbox 下创建独立空项目；请求的 `cwd` 只用于寻找已有对话，不会成为新对话的工作目录。
-- `new` 不读取历史上下文，并在接收端的 Mesh inbox 下为每次委派创建一个独立空项目。对话仍由本机 `codex app-server` 正常创建，因此会显示在 Codex Desktop App 的任务列表中。
+- `new` 不读取历史上下文，并在接收端的 Mesh inbox 下为每次委派创建一个独立空项目。该任务由本机 `codex app-server` 在后台管理，过程与后续继续操作显示在 Mesh Web 中，不依赖 Desktop 侧边栏可见性。
 
 对话清单由 Bridge 默认每 30 秒刷新一次，所以 MCP 侧看到的是缓存；实际执行前 Bridge 会再次读取本机对话。
 

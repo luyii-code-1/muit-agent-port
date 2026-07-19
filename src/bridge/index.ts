@@ -9,6 +9,7 @@ import {
 } from "../shared/types.js";
 import { errorMessage, sleep } from "../shared/util.js";
 import { CodexAppServer } from "./codexAppServer.js";
+import { DesktopIpc } from "./desktopIpc.js";
 import { applyBridgeArgs } from "./args.js";
 import { assertAllowedCwd, isAllowedCwd, loadBridgeConfig } from "./config.js";
 import { BridgeLedger } from "./ledger.js";
@@ -22,9 +23,12 @@ applyBridgeArgs(process.argv.slice(2));
 const config = loadBridgeConfig();
 await ensurePaired(config);
 const codex = new CodexAppServer(config.codexCommand);
+const desktop = new DesktopIpc();
 const ledger = new BridgeLedger(config.ledgerPath);
 const queue: DispatchPayload[] = [];
 const queuedIds = new Set<string>();
+const activeTasks = new Map<string, string>();
+const cancelledIds = new Set<string>();
 let active = 0;
 let socket: WebSocket | undefined;
 let stopping = false;
@@ -62,6 +66,7 @@ async function connectOnce(): Promise<void> {
         hostname: config.nodeHostname,
         platform: config.nodePlatform || platform(),
         labels: config.labels,
+        roles: config.roles,
         version: "0.1.0",
       });
     });
@@ -92,6 +97,9 @@ async function handleRelayMessage(raw: string): Promise<void> {
       break;
     case "dispatch":
       acceptTask(message.task);
+      break;
+    case "cancel":
+      await cancelTask(message.taskId, message.threadId);
       break;
   }
 }
@@ -147,22 +155,77 @@ async function runTask(task: DispatchPayload): Promise<void> {
       : createEmptyInboxProject(config.inboxRoot, task.taskId, config.allowedRoots);
     if (selected) {
       threadId = selected.id;
-      await codex.resumeThread(threadId, cwd, config.approvalPolicy, config.sandbox);
     } else {
       threadId = await codex.startThread(cwd, config.approvalPolicy, config.sandbox);
     }
     ledger.update(task.taskId, "running", { threadId });
-    send({ type: "task_started", taskId: task.taskId, threadId });
+    activeTasks.set(task.taskId, threadId);
     const prompt = buildCollaborationPrompt(task);
-    const result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt });
+    let result: string;
+    const useBackground = !selected || task.metadata?.meshExecutionMode === "background";
+    if (!useBackground) {
+      send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "desktop" });
+      sendProgress(task.taskId, threadId, "status", "Attached to Codex Desktop task");
+      const seen = new Set<string>();
+      result = await desktop.runTurn({
+        threadId,
+        prompt,
+        cwd,
+        approvalPolicy: config.approvalPolicy,
+      }, (progress) => {
+        const signature = JSON.stringify(progress);
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        sendProgress(task.taskId, threadId!, progress.kind, progress.title, progress.detail, progress.payload);
+      });
+    } else {
+      if (selected) {
+        await codex.resumeThread(threadId, cwd, config.approvalPolicy, config.sandbox);
+      }
+      send({ type: "task_started", taskId: task.taskId, threadId, executionMode: "background" });
+      sendProgress(
+        task.taskId,
+        threadId,
+        "status",
+        selected ? "Continued background app-server task" : "New empty-project task uses background app-server mode",
+      );
+      const seen = new Set<string>();
+      result = await codex.runTurn({ threadId, cwd, approvalPolicy: config.approvalPolicy, prompt }, (progress) => {
+        const signature = JSON.stringify(progress);
+        if (seen.has(signature)) return;
+        seen.add(signature);
+        sendProgress(task.taskId, threadId!, progress.kind, progress.title, progress.detail, progress.payload);
+      });
+    }
     ledger.update(task.taskId, "completed", { threadId, result });
-    send({ type: "task_completed", taskId: task.taskId, threadId, result });
+    if (!cancelledIds.has(task.taskId)) send({ type: "task_completed", taskId: task.taskId, threadId, result });
     await sendHeartbeat();
   } catch (error) {
     const message = errorMessage(error);
-    ledger.update(task.taskId, "failed", { threadId, error: message });
-    send({ type: "task_failed", taskId: task.taskId, threadId, error: message });
+    if (cancelledIds.has(task.taskId)) {
+      ledger.update(task.taskId, "failed", { threadId, error: "Cancelled by requester" });
+      send({ type: "task_cancelled", taskId: task.taskId, threadId });
+    } else {
+      ledger.update(task.taskId, "failed", { threadId, error: message });
+      send({ type: "task_failed", taskId: task.taskId, threadId, error: message });
+    }
+  } finally {
+    activeTasks.delete(task.taskId);
+    cancelledIds.delete(task.taskId);
   }
+}
+
+async function cancelTask(taskId: string, requestedThreadId?: string): Promise<void> {
+  const threadId = activeTasks.get(taskId) ?? requestedThreadId;
+  cancelledIds.add(taskId);
+  const queuedIndex = queue.findIndex((task) => task.taskId === taskId);
+  if (queuedIndex >= 0) {
+    queue.splice(queuedIndex, 1);
+    queuedIds.delete(taskId);
+  }
+  if (threadId) await desktop.interruptTurn(threadId);
+  ledger.update(taskId, "failed", { threadId, error: "Cancelled by requester" });
+  send({ type: "task_cancelled", taskId, threadId });
 }
 
 function chooseThread(task: DispatchPayload, threads: ThreadSummary[]): ThreadSummary | undefined {
@@ -187,10 +250,22 @@ function send(message: BridgeToRelay): void {
   socket.send(JSON.stringify(message));
 }
 
+function sendProgress(
+  taskId: string,
+  threadId: string,
+  kind: "status" | "thinking" | "message" | "tool" | "command" | "file" | "warning",
+  title: string,
+  detail?: string,
+  payload?: Record<string, unknown>,
+): void {
+  send({ type: "task_progress", taskId, threadId, kind, title, detail, payload });
+}
+
 async function shutdown(): Promise<void> {
   if (stopping) return;
   stopping = true;
   socket?.close(1000, "Bridge shutting down");
+  desktop.close();
   await codex.stop();
   ledger.close();
 }
