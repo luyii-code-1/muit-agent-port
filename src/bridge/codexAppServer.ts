@@ -89,6 +89,7 @@ export class CodexAppServer {
   private readonly pending = new Map<number, PendingCall>();
   private readonly events = new EventEmitter();
   private readonly completedTurns = new Map<string, Turn>();
+  private readonly completedItems = new Map<string, TurnItem[]>();
 
   constructor(private readonly codexCommand: string) {}
 
@@ -112,6 +113,7 @@ export class CodexAppServer {
         call.reject(error);
       }
       this.pending.clear();
+      this.completedItems.clear();
       this.child = undefined;
       this.events.emit("exit", error);
     });
@@ -194,7 +196,7 @@ export class CodexAppServer {
           if (turn.status !== "completed") {
             throw new Error(turn.error?.message ?? `Desktop Codex turn ended with status ${turn.status}`);
           }
-          return finalAgentMessage(turn);
+          return finalAgentMessage(turn) ?? "Task completed without a final agent message.";
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 650));
@@ -231,10 +233,20 @@ export class CodexAppServer {
     if (turn.status !== "completed") {
       throw new Error(turn.error?.message ?? `Codex turn ended with status ${turn.status}`);
     }
-    const messages = turn.items
-      .filter((item) => item.type === "agentMessage" && item.text)
-      .map((item) => item.text!);
-    return messages.at(-1) ?? "Task completed without a final agent message.";
+    const notificationMessage = finalAgentMessage(turn);
+    if (notificationMessage) return notificationMessage;
+
+    // Recent app-server builds may emit a slim turn/completed notification with
+    // no items. The complete turn is persisted on the thread shortly afterward.
+    // Hydrate it before concluding that the agent produced no final message.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const thread = await this.readThreadDetail(options.threadId);
+      const persistedTurn = thread.turns?.find((candidate) => candidate.id === turn.id);
+      const persistedMessage = persistedTurn ? finalAgentMessage(persistedTurn) : undefined;
+      if (persistedMessage) return persistedMessage;
+      if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return "Task completed without a final agent message.";
   }
 
   private call(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {
@@ -277,11 +289,23 @@ export class CodexAppServer {
         });
         return;
       }
-      if (message.method === "turn/completed") {
+      if (message.method === "item/completed") {
+        const turnId = message.params?.turnId;
+        const item = message.params?.item as TurnItem | undefined;
+        if (typeof turnId === "string" && item) {
+          const items = this.completedItems.get(turnId) ?? [];
+          this.completedItems.set(turnId, mergeTurnItems(items, [item]));
+        }
+      } else if (message.method === "turn/completed") {
         const turn = message.params?.turn as Turn | undefined;
         if (turn) {
-          this.completedTurns.set(turn.id, turn);
-          this.events.emit(`turn:${turn.id}`, turn);
+          const completedTurn = {
+            ...turn,
+            items: mergeTurnItems(this.completedItems.get(turn.id) ?? [], turn.items ?? []),
+          };
+          this.completedItems.delete(turn.id);
+          this.completedTurns.set(turn.id, completedTurn);
+          this.events.emit(`turn:${turn.id}`, completedTurn);
         }
       }
     } catch (error) {
@@ -331,11 +355,28 @@ export class CodexAppServer {
   }
 }
 
-function finalAgentMessage(turn: Turn): string {
+export function finalAgentMessage(turn: Turn): string | undefined {
   const messages = turn.items
     .filter((item) => item.type === "agentMessage" && item.text)
     .map((item) => item.text!);
-  return messages.at(-1) ?? "Task completed without a final agent message.";
+  return messages.at(-1);
+}
+
+export function mergeTurnItems(streamed: TurnItem[], completed: TurnItem[]): TurnItem[] {
+  const items: TurnItem[] = [];
+  const indexes = new Map<string, number>();
+  for (const item of [...streamed, ...completed]) {
+    if (item.id) {
+      const existing = indexes.get(item.id);
+      if (existing !== undefined) {
+        items[existing] = item;
+        continue;
+      }
+      indexes.set(item.id, items.length);
+    }
+    items.push(item);
+  }
+  return items;
 }
 
 export function summarizeTurnProgress(turn: Turn): CodexProgress[] {
